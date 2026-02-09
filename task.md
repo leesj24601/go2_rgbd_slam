@@ -16,7 +16,7 @@
 - [x] Unitree Go2 USD 로드 및 스폰
 - [ ] ArticulationController 설정 (joint position/velocity 제어) -> *Using Root Velocity for SLAM testing*
 - [ ] Keyboard Control 구현 (WASD 이동, QE 회전)
-- [ ] 로봇 보행 안정성 확인 (넘어지지 않는지)
+- [ ] 로봇 보행 안정성 확인 (넘어지지 않는것)
 
 ## 2. ROS2 Bridge & OmniGraph Setup
 - [ ] OmniGraph 생성 (Action Graph)
