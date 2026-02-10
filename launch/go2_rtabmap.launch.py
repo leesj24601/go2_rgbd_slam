@@ -56,20 +56,20 @@ def generate_launch_description():
                 "frame_id": "camera_link",
                 "odom_frame_id": "odom",
                 "publish_tf": True,
-                "wait_for_transform": 1.0,
+                "wait_for_transform": 0.5,
                 "approx_sync": True,
-                "approx_sync_max_interval": 0.1,
+                "approx_sync_max_interval": 0.1,  # 0.05 -> 0.1 (시간 오차 허용 범위 증가)
                 "subscribe_rgbd": False,
                 "qos": 0,
-                "queue_size": 10,
+                "queue_size": 50,  # 10 -> 50 (버퍼 크기 증가)
                 "use_sim_time": use_sim_time,
                 "Odom/Strategy": "0",
                 "Odom/GuessMotion": "true",
                 "Odom/ResetCountdown": "5",
                 "Odom/ImageDecimation": "2",
                 "Vis/FeatureType": "8",
-                "Vis/MaxFeatures": "800",
-                "Vis/MinInliers": "10",
+                "Vis/MaxFeatures": "400",  # 800 -> 400 (특징점 개수 줄여서 연산 부하 감소)
+                "Vis/MinInliers": "15",    # 10 -> 15 (더 확실한 매칭만 사용)
                 "Vis/MaxDepth": "8.0",
                 "GFTT/MinDistance": "3",
             }
