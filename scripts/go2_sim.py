@@ -117,23 +117,44 @@ def setup_ros2_camera_graph(camera_prim_path: str):
             ],
             keys.SET_VALUES: [
                 ("cameraHelperRgb.inputs:renderProductPath", rp_path),
-                ("cameraHelperRgb.inputs:frameId", "camera_link"),
+                ("cameraHelperRgb.inputs:frameId", "camera_optical_frame"),
                 ("cameraHelperRgb.inputs:topicName", "camera/color/image_raw"),
                 ("cameraHelperRgb.inputs:type", "rgb"),
                 ("cameraHelperDepth.inputs:renderProductPath", rp_path),
-                ("cameraHelperDepth.inputs:frameId", "camera_link"),
+                ("cameraHelperDepth.inputs:frameId", "camera_optical_frame"),
                 ("cameraHelperDepth.inputs:topicName", "camera/depth/image_rect_raw"),
                 ("cameraHelperDepth.inputs:type", "depth"),
                 ("cameraHelperInfo.inputs:renderProductPath", rp_path),
-                ("cameraHelperInfo.inputs:frameId", "camera_link"),
+                ("cameraHelperInfo.inputs:frameId", "camera_optical_frame"),
                 ("cameraHelperInfo.inputs:topicName", "camera/camera_info"),
             ],
         },
     )
 
     og.Controller.evaluate_sync(ros_camera_graph)
-    # NOTE: simulation_app.update() 제거 - 시간 불일치 경고 방지
     print("[INFO] ROS2 카메라 퍼블리셔 OmniGraph 설정 완료")
+
+    # /clock 퍼블리시 (use_sim_time 지원)
+    (clock_graph, _, _, _) = og.Controller.edit(
+        {
+            "graph_path": "/ROS2_Clock",
+            "evaluator_name": "push",
+            "pipeline_stage": og.GraphPipelineStage.GRAPH_PIPELINE_STAGE_SIMULATION,
+        },
+        {
+            keys.CREATE_NODES: [
+                ("OnTick", "omni.graph.action.OnTick"),
+                ("readSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+                ("publishClock", "isaacsim.ros2.bridge.ROS2PublishClock"),
+            ],
+            keys.CONNECT: [
+                ("OnTick.outputs:tick", "publishClock.inputs:execIn"),
+                ("readSimTime.outputs:simulationTime", "publishClock.inputs:timeStamp"),
+            ],
+        },
+    )
+    og.Controller.evaluate_sync(clock_graph)
+    print("[INFO] ROS2 /clock 퍼블리셔 설정 완료")
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
