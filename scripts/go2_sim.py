@@ -3,9 +3,14 @@ import argparse
 import sys
 import os
 import time
+import logging
 import numpy as np
 import torch
 import gymnasium as gym
+
+# Isaac Sim 경고 로그 필터링
+logging.getLogger("isaacsim").setLevel(logging.ERROR)
+logging.getLogger("omni").setLevel(logging.ERROR)
 
 from isaaclab.app import AppLauncher
 
@@ -83,78 +88,124 @@ class WasdKeyboard(Se2Keyboard):
 
 
 def setup_ros2_camera_graph(camera_prim_path: str):
-    """숨겨진 뷰포트에서 렌더 프로덕트 생성 → OmniGraph ROS2 퍼블리시."""
+    """숨겨진 뷰포트에서 렌더 프로덕트 생성 → OmniGraph ROS2 퍼블리시.
+
+    공식 예제 방식: execution evaluator + SIMULATION pipeline + frameSkipCount
+    → evaluate_sync 블로킹 없이 시뮬레이션 스텝과 자동 동기화
+    """
     from omni.kit.viewport.utility import create_viewport_window
 
-    # 숨겨진 뷰포트 생성 (메인 뷰포트에 영향 없음)
+    # 숨겨진 뷰포트 생성 (메인 뷰포트에 영향 없음) - 320x240 저해상도
     vp_window = create_viewport_window(
-        "ROS2_Camera", width=640, height=480, visible=False
+        "ROS2_Camera", width=320, height=240, visible=False
     )
     vp_api = vp_window.viewport_api
     vp_api.set_active_camera(camera_prim_path)
-    # NOTE: simulation_app.update() 제거 - 시간 불일치 경고 방지
     rp_path = vp_api.get_render_product_path()
     print(f"[INFO] 숨겨진 뷰포트 렌더 프로덕트: {rp_path}")
+
+    # frameSkipCount: 퍼블리시Hz = simFPS / (skipCount + 1)
+    # 시뮬레이션 ~30fps 기준 → skipCount=2 → ~10Hz 퍼블리시
+    FRAME_SKIP = 2
 
     keys = og.Controller.Keys
     (ros_camera_graph, _, _, _) = og.Controller.edit(
         {
             "graph_path": "/ROS2_Camera",
-            "evaluator_name": "push",
-            "pipeline_stage": og.GraphPipelineStage.GRAPH_PIPELINE_STAGE_ONDEMAND,
+            "evaluator_name": "execution",
+            "pipeline_stage": og.GraphPipelineStage.GRAPH_PIPELINE_STAGE_SIMULATION,
         },
         {
             keys.CREATE_NODES: [
-                ("OnTick", "omni.graph.action.OnTick"),
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
                 ("cameraHelperRgb", "isaacsim.ros2.bridge.ROS2CameraHelper"),
                 ("cameraHelperDepth", "isaacsim.ros2.bridge.ROS2CameraHelper"),
                 ("cameraHelperInfo", "isaacsim.ros2.bridge.ROS2CameraInfoHelper"),
             ],
             keys.CONNECT: [
-                ("OnTick.outputs:tick", "cameraHelperRgb.inputs:execIn"),
-                ("OnTick.outputs:tick", "cameraHelperDepth.inputs:execIn"),
-                ("OnTick.outputs:tick", "cameraHelperInfo.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "cameraHelperRgb.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "cameraHelperDepth.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "cameraHelperInfo.inputs:execIn"),
             ],
             keys.SET_VALUES: [
                 ("cameraHelperRgb.inputs:renderProductPath", rp_path),
                 ("cameraHelperRgb.inputs:frameId", "camera_optical_frame"),
                 ("cameraHelperRgb.inputs:topicName", "camera/color/image_raw"),
                 ("cameraHelperRgb.inputs:type", "rgb"),
+                ("cameraHelperRgb.inputs:frameSkipCount", FRAME_SKIP),
                 ("cameraHelperDepth.inputs:renderProductPath", rp_path),
                 ("cameraHelperDepth.inputs:frameId", "camera_optical_frame"),
                 ("cameraHelperDepth.inputs:topicName", "camera/depth/image_rect_raw"),
                 ("cameraHelperDepth.inputs:type", "depth"),
+                ("cameraHelperDepth.inputs:frameSkipCount", FRAME_SKIP),
                 ("cameraHelperInfo.inputs:renderProductPath", rp_path),
                 ("cameraHelperInfo.inputs:frameId", "camera_optical_frame"),
                 ("cameraHelperInfo.inputs:topicName", "camera/camera_info"),
+                ("cameraHelperInfo.inputs:frameSkipCount", FRAME_SKIP),
             ],
         },
     )
-
-    og.Controller.evaluate_sync(ros_camera_graph)
-    print("[INFO] ROS2 카메라 퍼블리셔 OmniGraph 설정 완료")
+    print(f"[INFO] ROS2 카메라 퍼블리셔 설정 완료 (320x240, frameSkip={FRAME_SKIP})")
 
     # /clock 퍼블리시 (use_sim_time 지원)
     (clock_graph, _, _, _) = og.Controller.edit(
         {
             "graph_path": "/ROS2_Clock",
-            "evaluator_name": "push",
+            "evaluator_name": "execution",
             "pipeline_stage": og.GraphPipelineStage.GRAPH_PIPELINE_STAGE_SIMULATION,
         },
         {
             keys.CREATE_NODES: [
-                ("OnTick", "omni.graph.action.OnTick"),
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
                 ("readSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
                 ("publishClock", "isaacsim.ros2.bridge.ROS2PublishClock"),
             ],
             keys.CONNECT: [
-                ("OnTick.outputs:tick", "publishClock.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "publishClock.inputs:execIn"),
                 ("readSimTime.outputs:simulationTime", "publishClock.inputs:timeStamp"),
+            ],
+            keys.SET_VALUES: [
+                ("publishClock.inputs:topicName", "/clock"),
             ],
         },
     )
-    og.Controller.evaluate_sync(clock_graph)
     print("[INFO] ROS2 /clock 퍼블리셔 설정 완료")
+
+
+def setup_robot_tf_graph():
+    """Go2 base_link TF 퍼블리셔 설정 (odom → base_link)"""
+    keys = og.Controller.Keys
+    (tf_graph, _, _, _) = og.Controller.edit(
+        {
+            "graph_path": "/ROS2_RobotTF",
+            "evaluator_name": "execution",
+            "pipeline_stage": og.GraphPipelineStage.GRAPH_PIPELINE_STAGE_SIMULATION,
+        },
+        {
+            keys.CREATE_NODES: [
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+                ("readSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+                ("readPrim", "isaacsim.core.nodes.IsaacReadPrimNode"),
+                ("publishTF", "isaacsim.ros2.bridge.ROS2PublishTransformTree"),
+            ],
+            keys.CONNECT: [
+                ("OnPlaybackTick.outputs:tick", "readPrim.inputs:execIn"),
+                ("readPrim.outputs:execOut", "publishTF.inputs:execIn"),
+                ("readSimTime.outputs:simulationTime", "publishTF.inputs:timeStamp"),
+            ],
+            keys.SET_VALUES: [
+                ("readPrim.inputs:primPath", "/World/envs/env_0/Robot/base"),
+                ("readPrim.inputs:axis", "X"),
+                (
+                    "publishTF.inputs:parentFrameId",
+                    "camera_link",
+                ),  # camera_link 기준 (RTAB-Map odom 기준)
+                ("publishTF.inputs:childFrameId", "base_link"),
+                ("publishTF.inputs:topicName", "/tf"),
+            ],
+        },
+    )
+    print("[INFO] ROS2 robot TF 퍼블리셔 설정 완료 (camera_link → base_link)")
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
@@ -178,12 +229,18 @@ def main(env_cfg, agent_cfg):
     runner.load(resume_path)
     policy = runner.get_inference_policy(device=env.unwrapped.device)
 
-    # 5. ROS2 OmniGraph 카메라 퍼블리셔 설정
+    # 5. ROS2 OmniGraph 카메라 퍼블리셔 설정 (SIMULATION 파이프라인 - 자동 실행)
     cam_prim_path = "/World/envs/env_0/Robot/base/front_cam"
     try:
         setup_ros2_camera_graph(cam_prim_path)
     except Exception as e:
         print(f"[WARN] ROS2 bridge 설정 실패: {e}")
+
+    # 5.5 Go2 base_link TF 퍼블리셔 설정
+    try:
+        setup_robot_tf_graph()
+    except Exception as e:
+        print(f"[WARN] Robot TF 설정 실패: {e}")
 
     # 6. Reset & Loop
     obs = env.get_observations()
@@ -194,20 +251,56 @@ def main(env_cfg, agent_cfg):
         )
     )
 
+    # 키보드 명령 지속 방지를 위한 변수들
+    last_vel_cmd = np.array([0.0, 0.0, 0.0])
+    stuck_counter = 0
+    STUCK_THRESHOLD = 5  # 5프레임 동안 같은 명령이면 리셋 (릴리즈 이벤트 누락 대응)
+    frame_count = 0
+
+    # 명령 manager 미리 캐싱
+    cmd_term = None
+    if hasattr(env.unwrapped, "command_manager"):
+        cmd_term = env.unwrapped.command_manager.get_term("base_velocity")
+
     while simulation_app.is_running():
         start_time = time.time()
-        vel_cmd = keyboard.advance()
+        raw_vel_cmd = keyboard.advance()
+        vel_cmd = np.asarray(raw_vel_cmd.cpu().numpy(), dtype=np.float32)
 
-        if hasattr(env.unwrapped, "command_manager"):
-            cmd_term = env.unwrapped.command_manager.get_term("base_velocity")
-            if cmd_term is not None:
-                cmd_term.vel_command_b[:] = torch.tensor(
-                    vel_cmd, device=env.unwrapped.device, dtype=torch.float32
-                )
+        # 스턱(같은 명령 지속) 감지 — 키 릴리즈 누락 시 빠르게 리셋
+        if np.allclose(vel_cmd, last_vel_cmd, atol=0.01) and np.any(
+            np.abs(vel_cmd) > 0.1
+        ):
+            stuck_counter += 1
+            if stuck_counter >= STUCK_THRESHOLD:
+                keyboard.reset()
+                vel_cmd = np.array([0.0, 0.0, 0.0])
+                stuck_counter = 0
+        else:
+            stuck_counter = 0
+        last_vel_cmd = vel_cmd.copy()
+
+        # 데드존
+        if np.all(np.abs(vel_cmd) < 0.05):
+            vel_cmd = np.array([0.0, 0.0, 0.0])
+
+        # 명령어 적용
+        if cmd_term is not None:
+            cmd_term.vel_command_b[0] = torch.tensor(
+                [vel_cmd[0], vel_cmd[1], vel_cmd[2]],
+                device=env.unwrapped.device,
+                dtype=torch.float32,
+            )
 
         with torch.inference_mode():
             actions = policy(obs)
             obs, _, _, _ = env.step(actions)
+
+        # FPS 출력 (100프레임마다만 — I/O 블로킹 최소화)
+        frame_count += 1
+        if frame_count % 100 == 0:
+            fps = 100.0 / (time.time() - start_time + 1e-6)
+            print(f"[INFO] frame={frame_count}, loop_fps≈{1.0/(time.time()-start_time):.1f}, cmd={vel_cmd}")
 
         if args_cli.rt.lower() in ("true", "1", "yes"):
             sleep_time = dt - (time.time() - start_time)

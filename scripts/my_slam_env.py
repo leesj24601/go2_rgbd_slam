@@ -46,10 +46,10 @@ class MySlamEnvCfg(UnitreeGo2RoughEnvCfg):
         # Intel RealSense D435 근사 카메라
         self.scene.front_cam = CameraCfg(
             prim_path="{ENV_REGEX_NS}/Robot/base/front_cam",
-            update_period=1 / 30,  # 30fps
-            height=480,
-            width=640,
-            data_types=["rgb", "distance_to_image_plane"],
+            update_period=0,  # 센서 데이터 수집 비활성화 (ROS2는 숨겨진 뷰포트 사용)
+            height=240,
+            width=320,
+            data_types=[],  # prim만 생성, 센서 렌더링 안 함 (이중 렌더링 방지)
             spawn=sim_utils.PinholeCameraCfg(
                 focal_length=15.0,
                 focus_distance=400.0,

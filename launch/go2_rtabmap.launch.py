@@ -1,14 +1,3 @@
-"""
-RTAB-Map RGBD SLAM launch file for Go2 + Isaac Sim.
-
-Isaac Sim이 퍼블리시하는 카메라 토픽을 구독하여
-Visual Odometry + SLAM + 3D/2D 맵 생성.
-
-Usage:
-    source /opt/ros/humble/setup.bash
-    ros2 launch /home/cvr/Desktop/sj/isaac-project/launch/go2_rtabmap.launch.py
-"""
-
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -16,27 +5,21 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    # Launch arguments
     use_sim_time = LaunchConfiguration("use_sim_time")
 
-    # Isaac Sim 토픽 remapping (공통)
     camera_remappings = [
         ("rgb/image", "/camera/color/image_raw"),
         ("depth/image", "/camera/depth/image_rect_raw"),
         ("rgb/camera_info", "/camera/camera_info"),
     ]
 
-    # --- static TF: odom → camera_link ---
-    # 로봇의 초기 위치(odom)에서 카메라(go2 머리)까지의 변환
-    # x=0.3m (전방), z=0.35m (지상고)
-    # roll=-1.57 (카메라가 정면을 보도록 회전 보정)
     camera_tf_node = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
         arguments=[
-            "0.3",
-            "0",
-            "0.35",
+            "0.30",
+            "0.0",
+            "0.05",
             "-1.5708",
             "0",
             "-1.5708",
@@ -45,8 +28,6 @@ def generate_launch_description():
         ],
     )
 
-    # --- rgbd_odometry 노드 ---
-    # RGB+Depth로 Visual Odometry 계산
     rgbd_odometry_node = Node(
         package="rtabmap_odom",
         executable="rgbd_odometry",
@@ -56,29 +37,32 @@ def generate_launch_description():
                 "frame_id": "camera_link",
                 "odom_frame_id": "odom",
                 "publish_tf": True,
-                "wait_for_transform": 0.5,
+                "tf_delay": 0.05,
+                "wait_for_transform": 0.2,
                 "approx_sync": True,
-                "approx_sync_max_interval": 0.1,  # 0.05 -> 0.1 (시간 오차 허용 범위 증가)
+                "approx_sync_max_interval": 0.5,
                 "subscribe_rgbd": False,
-                "qos": 0,
-                "queue_size": 50,  # 10 -> 50 (버퍼 크기 증가)
+                "qos": 1,
+                "queue_size": 5,
                 "use_sim_time": use_sim_time,
                 "Odom/Strategy": "0",
                 "Odom/GuessMotion": "true",
-                "Odom/ResetCountdown": "5",
+                "Odom/ResetCountdown": "0",
+                "Vis/FeatureType": "6",
+                "Vis/MaxFeatures": "500",
+                "Vis/MinInliers": "10",
+                "Vis/InlierDistance": "0.15",
+                "Vis/MaxDepth": "10.0",
+                "GFTT/MinDistance": "5",
+                "Vis/CorGuessWinSize": "50",
+                "Odom/FillInfoData": "true",
+                "Odom/KeyFrameThr": "0.3",
                 "Odom/ImageDecimation": "2",
-                "Vis/FeatureType": "8",
-                "Vis/MaxFeatures": "400",  # 800 -> 400 (특징점 개수 줄여서 연산 부하 감소)
-                "Vis/MinInliers": "15",    # 10 -> 15 (더 확실한 매칭만 사용)
-                "Vis/MaxDepth": "8.0",
-                "GFTT/MinDistance": "3",
             }
         ],
         remappings=camera_remappings + [("odom", "/odom")],
     )
 
-    # --- rtabmap SLAM 노드 ---
-    # Visual Odometry + RGB-D → SLAM + 맵 생성
     rtabmap_node = Node(
         package="rtabmap_slam",
         executable="rtabmap",
@@ -91,43 +75,32 @@ def generate_launch_description():
                 "subscribe_depth": True,
                 "subscribe_odom_info": True,
                 "approx_sync": True,
-                "approx_sync_max_interval": 0.1,
+                "approx_sync_max_interval": 0.5,
                 "publish_tf": True,
-                "qos": 0,
-                "queue_size": 10,
+                "tf_delay": 0.05,
+                "qos": 1,
+                "queue_size": 5,
                 "use_sim_time": use_sim_time,
-                "Rtabmap/DetectionRate": "5",
+                "Rtabmap/DetectionRate": "0.5",
+                "Rtabmap/LoopClosureReextractFeatures": "true",
                 "Reg/Strategy": "0",
-                "RGBD/OptimizeMaxError": "0",
-                "Reg/Force3DoF": "true",  # 2D 평면 이동 가정 (Z축 고정)
-                "Grid/FromDepth": "false",
-                "Grid/RangeMax": "3.0",
-                "Grid/CellSize": "0.1",
+                "RGBD/OptimizeMaxError": "3.0",
+                "RGBD/ProximityPathMaxNeighbors": "10",
+                "RGBD/AngularUpdate": "0.1",
+                "RGBD/LinearUpdate": "0.1",
+                "Reg/Force3DoF": "true",
+                "Grid/FromDepth": "true",
+                "Grid/RangeMax": "5.0",
+                "Grid/CellSize": "0.05",
+                "Grid/MaxGroundHeight": "0.05",
+                "Grid/MaxObstacleHeight": "2.0",
+                "Grid/NormalsSegmentation": "false",
+                "Rtabmap/MemoryThr": "0",
+                "Rtabmap/ImageBufferSize": "1",
             }
         ],
         remappings=camera_remappings + [("odom", "/odom")],
-        arguments=["-d"],  # 매 실행 시 DB 초기화 (개발 단계)
-    )
-
-    # --- rtabmap_viz 시각화 노드 (추가됨) ---
-    # SLAM 과정, 루프 클로저, 특징점 매칭 등을 실시간으로 시각화
-    # 주의: GPU 자원을 많이 사용하여 시뮬레이션 랙을 유발할 수 있음
-    rtabmap_viz_node = Node(
-        package="rtabmap_viz",
-        executable="rtabmap_viz",
-        output="screen",
-        parameters=[
-            {
-                "frame_id": "camera_link",
-                "odom_frame_id": "odom",
-                "subscribe_depth": True,
-                "subscribe_odom_info": True,
-                "approx_sync": True,
-                "queue_size": 10,
-                "use_sim_time": use_sim_time,
-            }
-        ],
-        remappings=camera_remappings + [("odom", "/odom")],
+        arguments=["-d"],
     )
 
     return LaunchDescription(
@@ -140,7 +113,5 @@ def generate_launch_description():
             camera_tf_node,
             rgbd_odometry_node,
             rtabmap_node,
-            # 시각화 노드 활성화 (랙이 걸리면 아래 라인을 주석 처리하세요)
-            rtabmap_viz_node,
         ]
     )
