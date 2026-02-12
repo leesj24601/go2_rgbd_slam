@@ -66,7 +66,7 @@ def generate_launch_description():
                 "RGBD/ProximityPathMaxNeighbors": "10",
                 "RGBD/AngularUpdate": "0.1",
                 "RGBD/LinearUpdate": "0.1",
-                "Reg/Force3DoF": "true",
+                "Reg/Force3DoF": "false",
                 "Grid/FromDepth": "true",
                 "Grid/RangeMax": "5.0",
                 "Grid/CellSize": "0.05",

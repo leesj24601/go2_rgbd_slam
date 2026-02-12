@@ -172,11 +172,11 @@ def setup_ros2_camera_graph(camera_prim_path: str):
     print("[INFO] ROS2 /clock 퍼블리셔 설정 완료")
 
 
-def setup_odom_graph():
+def setup_odom_graph(chassis_prim_path: str):
     """Odometry + TF (odom → base_link) 퍼블리셔 설정.
 
-    OmniGraph로 그래프만 생성하고, 실제 데이터(position, orientation, velocity)는
-    메인 루프에서 og.Controller.set()으로 주입합니다.
+    IsaacComputeOdometry가 prim에서 직접 position/orientation/velocity를 읽어
+    같은 SIMULATION pipeline tick에서 퍼블리시 → 카메라와 완벽 동기화.
     """
     keys = og.Controller.Keys
     og.Controller.edit(
@@ -189,14 +189,26 @@ def setup_odom_graph():
             keys.CREATE_NODES: [
                 ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
                 ("readSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+                ("computeOdom", "isaacsim.core.nodes.IsaacComputeOdometry"),
                 ("publishOdom", "isaacsim.ros2.bridge.ROS2PublishOdometry"),
                 ("publishTF", "isaacsim.ros2.bridge.ROS2PublishRawTransformTree"),
             ],
             keys.CONNECT: [
-                ("OnPlaybackTick.outputs:tick", "publishOdom.inputs:execIn"),
-                ("OnPlaybackTick.outputs:tick", "publishTF.inputs:execIn"),
+                # 실행 흐름: tick → computeOdom → publishOdom, publishTF
+                ("OnPlaybackTick.outputs:tick", "computeOdom.inputs:execIn"),
+                ("computeOdom.outputs:execOut", "publishOdom.inputs:execIn"),
+                ("computeOdom.outputs:execOut", "publishTF.inputs:execIn"),
+                # 타임스탬프
                 ("readSimTime.outputs:simulationTime", "publishOdom.inputs:timeStamp"),
                 ("readSimTime.outputs:simulationTime", "publishTF.inputs:timeStamp"),
+                # computeOdom 출력 → publishOdom 입력
+                ("computeOdom.outputs:position", "publishOdom.inputs:position"),
+                ("computeOdom.outputs:orientation", "publishOdom.inputs:orientation"),
+                ("computeOdom.outputs:linearVelocity", "publishOdom.inputs:linearVelocity"),
+                ("computeOdom.outputs:angularVelocity", "publishOdom.inputs:angularVelocity"),
+                # computeOdom 출력 → publishTF 입력
+                ("computeOdom.outputs:position", "publishTF.inputs:translation"),
+                ("computeOdom.outputs:orientation", "publishTF.inputs:rotation"),
             ],
             keys.SET_VALUES: [
                 # Odometry 메시지 설정
@@ -210,7 +222,17 @@ def setup_odom_graph():
             ],
         },
     )
-    print("[INFO] ROS2 Odometry + TF (odom → base_link) 퍼블리셔 설정 완료")
+
+    # chassisPrim relationship 설정 (USD API 필요)
+    import omni.usd
+    from pxr import Sdf
+
+    stage = omni.usd.get_context().get_stage()
+    compute_prim = stage.GetPrimAtPath("/ROS2_Odom/computeOdom")
+    compute_prim.GetRelationship("inputs:chassisPrim").SetTargets(
+        [Sdf.Path(chassis_prim_path)]
+    )
+    print("[INFO] ROS2 Odometry + TF (odom → base_link) 퍼블리셔 설정 완료 (OmniGraph 동기화)")
 
 
 def setup_imu_graph():
@@ -272,9 +294,10 @@ def main(env_cfg, agent_cfg):
     except Exception as e:
         print(f"[WARN] ROS2 bridge 설정 실패: {e}")
 
-    # 5.5 Odometry + TF (odom → base_link) 퍼블리셔 설정
+    # 5.5 Odometry + TF (odom → base_link) 퍼블리셔 설정 (OmniGraph 내 동기화)
+    robot_base_prim = "/World/envs/env_0/Robot/base"
     try:
-        setup_odom_graph()
+        setup_odom_graph(robot_base_prim)
     except Exception as e:
         print(f"[WARN] Odom 설정 실패: {e}")
 
@@ -298,13 +321,7 @@ def main(env_cfg, agent_cfg):
     if hasattr(env.unwrapped, "command_manager"):
         cmd_term = env.unwrapped.command_manager.get_term("base_velocity")
 
-    # OmniGraph 속성 경로 헬퍼
-    def _odom_attr(name):
-        return og.Controller.attribute(f"/ROS2_Odom/publishOdom.inputs:{name}")
-
-    def _tf_attr(name):
-        return og.Controller.attribute(f"/ROS2_Odom/publishTF.inputs:{name}")
-
+    # IMU OmniGraph 속성 경로 헬퍼 (odom/TF는 OmniGraph 내부에서 자동 동기화)
     def _imu_attr(name):
         return og.Controller.attribute(f"/ROS2_IMU/publishImu.inputs:{name}")
 
@@ -318,39 +335,13 @@ def main(env_cfg, agent_cfg):
             cmd_term.vel_command_b[0, 1] = vel_cmd[1]
             cmd_term.vel_command_b[0, 2] = vel_cmd[2]
 
-        with torch.inference_mode():
-            actions = policy(obs)
-            obs, _, _, _ = env.step(actions)
-
-        # --- Ground truth 데이터 주입 (OmniGraph) ---
+        # IMU 데이터 사전 주입 (env.step 내 SIMULATION pipeline에서 퍼블리시됨)
         try:
-            robot = env.unwrapped.scene["robot"]
-
-            # 위치/방향 (world frame)
-            pos = robot.data.root_link_pos_w[0].cpu().numpy()
-            quat_wxyz = robot.data.root_link_quat_w[0].cpu().numpy()
-            # Isaac Lab: WXYZ → OmniGraph: XYZW
-            quat_xyzw = [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]
-
-            # 속도 (world frame)
-            lin_vel = robot.data.root_link_lin_vel_w[0].cpu().numpy()
-            ang_vel = robot.data.root_link_ang_vel_w[0].cpu().numpy()
-
-            # Odometry 메시지 주입
-            og.Controller.set(_odom_attr("position"), pos.tolist())
-            og.Controller.set(_odom_attr("orientation"), quat_xyzw)
-            og.Controller.set(_odom_attr("linearVelocity"), lin_vel.tolist())
-            og.Controller.set(_odom_attr("angularVelocity"), ang_vel.tolist())
-
-            # TF (odom → base_link) 주입
-            og.Controller.set(_tf_attr("translation"), pos.tolist())
-            og.Controller.set(_tf_attr("rotation"), quat_xyzw)
-
-            # IMU 데이터 주입
             imu = env.unwrapped.scene["imu_sensor"]
             imu_ang_vel = imu.data.ang_vel_b[0].cpu().numpy()
             imu_lin_acc = imu.data.lin_acc_b[0].cpu().numpy()
             imu_quat_wxyz = imu.data.quat_w[0].cpu().numpy()
+            # Isaac Lab WXYZ → OmniGraph XYZW (IJKR)
             imu_quat_xyzw = [imu_quat_wxyz[1], imu_quat_wxyz[2], imu_quat_wxyz[3], imu_quat_wxyz[0]]
 
             og.Controller.set(_imu_attr("angularVelocity"), imu_ang_vel.tolist())
@@ -358,6 +349,15 @@ def main(env_cfg, agent_cfg):
             og.Controller.set(_imu_attr("orientation"), imu_quat_xyzw)
         except Exception:
             pass  # 초기 프레임에서 데이터 없을 수 있음
+
+        with torch.inference_mode():
+            actions = policy(obs)
+            obs, _, _, _ = env.step(actions)
+            # env.step() 내부에서 SIMULATION pipeline 실행:
+            # - IsaacComputeOdometry가 prim에서 직접 pos/quat/vel 읽기
+            # - ROS2PublishOdometry + ROS2PublishRawTransformTree 퍼블리시
+            # - 카메라 렌더 + 퍼블리시
+            # → 모두 같은 tick에서 실행되어 완벽 동기화
 
         if args_cli.rt.lower() in ("true", "1", "yes"):
             sleep_time = dt - (time.time() - start_time)
