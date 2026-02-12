@@ -1,7 +1,7 @@
 # my_slam_env.py
 from isaaclab.utils import configclass
 from isaaclab.terrains import TerrainImporterCfg
-from isaaclab.sensors import CameraCfg
+from isaaclab.sensors import CameraCfg, ImuCfg
 import isaaclab.sim as sim_utils
 from isaaclab_tasks.manager_based.locomotion.velocity.config.go2.rough_env_cfg import (
     UnitreeGo2RoughEnvCfg,
@@ -42,6 +42,13 @@ class MySlamEnvCfg(UnitreeGo2RoughEnvCfg):
         self.episode_length_s = 1.0e9
         if hasattr(self.curriculum, "terrain_levels"):
             self.curriculum.terrain_levels = None
+
+        # IMU 센서 (50Hz, body frame)
+        self.scene.imu_sensor = ImuCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/base",
+            update_period=1.0 / 50.0,
+            gravity_bias=(0.0, 0.0, 9.81),
+        )
 
         # Intel RealSense D435 근사 카메라
         self.scene.front_cam = CameraCfg(

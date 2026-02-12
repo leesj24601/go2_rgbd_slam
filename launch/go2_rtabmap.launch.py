@@ -13,54 +13,28 @@ def generate_launch_description():
         ("rgb/camera_info", "/camera/camera_info"),
     ]
 
-    camera_tf_node = Node(
+    # Static TF 1: base_link → camera_link (위치만, 회전 없음)
+    base_to_camera_tf = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
         arguments=[
-            "0.30",
-            "0.0",
-            "0.05",
-            "-1.5708",
-            "0",
-            "-1.5708",
+            "0.30", "0.0", "0.05",
+            "0", "0", "0",
+            "base_link",
             "camera_link",
-            "camera_optical_frame",
         ],
     )
 
-    rgbd_odometry_node = Node(
-        package="rtabmap_odom",
-        executable="rgbd_odometry",
-        output="screen",
-        parameters=[
-            {
-                "frame_id": "camera_link",
-                "odom_frame_id": "odom",
-                "publish_tf": True,
-                "tf_delay": 0.05,
-                "wait_for_transform": 0.2,
-                "approx_sync": True,
-                "approx_sync_max_interval": 0.5,
-                "subscribe_rgbd": False,
-                "qos": 1,
-                "queue_size": 5,
-                "use_sim_time": use_sim_time,
-                "Odom/Strategy": "0",
-                "Odom/GuessMotion": "true",
-                "Odom/ResetCountdown": "0",
-                "Vis/FeatureType": "6",
-                "Vis/MaxFeatures": "500",
-                "Vis/MinInliers": "10",
-                "Vis/InlierDistance": "0.15",
-                "Vis/MaxDepth": "10.0",
-                "GFTT/MinDistance": "5",
-                "Vis/CorGuessWinSize": "50",
-                "Odom/FillInfoData": "true",
-                "Odom/KeyFrameThr": "0.3",
-                "Odom/ImageDecimation": "2",
-            }
+    # Static TF 2: camera_link → camera_optical_frame (회전만, 위치 없음)
+    camera_to_optical_tf = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        arguments=[
+            "0", "0", "0",
+            "-1.5708", "0", "-1.5708",
+            "camera_link",
+            "camera_optical_frame",
         ],
-        remappings=camera_remappings + [("odom", "/odom")],
     )
 
     rtabmap_node = Node(
@@ -73,14 +47,18 @@ def generate_launch_description():
                 "map_frame_id": "map",
                 "odom_frame_id": "odom",
                 "subscribe_depth": True,
-                "subscribe_odom_info": True,
+                "subscribe_odom_info": False,
                 "approx_sync": True,
                 "approx_sync_max_interval": 0.5,
                 "publish_tf": True,
                 "tf_delay": 0.05,
+                "wait_for_transform": 0.5,
                 "qos": 1,
                 "queue_size": 5,
                 "use_sim_time": use_sim_time,
+                # IMU 구독
+                "subscribe_imu": True,
+                # RTAB-Map 파라미터
                 "Rtabmap/DetectionRate": "0.5",
                 "Rtabmap/LoopClosureReextractFeatures": "true",
                 "Reg/Strategy": "0",
@@ -99,7 +77,10 @@ def generate_launch_description():
                 "Rtabmap/ImageBufferSize": "1",
             }
         ],
-        remappings=camera_remappings + [("odom", "/odom")],
+        remappings=camera_remappings + [
+            ("odom", "/odom"),
+            ("imu", "/imu/data"),
+        ],
         arguments=["-d"],
     )
 
@@ -110,8 +91,8 @@ def generate_launch_description():
                 default_value="true",
                 description="Use simulation clock from /clock topic",
             ),
-            camera_tf_node,
-            rgbd_odometry_node,
+            base_to_camera_tf,
+            camera_to_optical_tf,
             rtabmap_node,
         ]
     )

@@ -172,12 +172,16 @@ def setup_ros2_camera_graph(camera_prim_path: str):
     print("[INFO] ROS2 /clock 퍼블리셔 설정 완료")
 
 
-def setup_robot_tf_graph():
-    """Go2 base_link TF 퍼블리셔 설정 (odom → base_link)"""
+def setup_odom_graph():
+    """Odometry + TF (odom → base_link) 퍼블리셔 설정.
+
+    OmniGraph로 그래프만 생성하고, 실제 데이터(position, orientation, velocity)는
+    메인 루프에서 og.Controller.set()으로 주입합니다.
+    """
     keys = og.Controller.Keys
-    (tf_graph, _, _, _) = og.Controller.edit(
+    og.Controller.edit(
         {
-            "graph_path": "/ROS2_RobotTF",
+            "graph_path": "/ROS2_Odom",
             "evaluator_name": "execution",
             "pipeline_stage": og.GraphPipelineStage.GRAPH_PIPELINE_STAGE_SIMULATION,
         },
@@ -185,27 +189,59 @@ def setup_robot_tf_graph():
             keys.CREATE_NODES: [
                 ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
                 ("readSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
-                ("readPrim", "isaacsim.core.nodes.IsaacReadPrimNode"),
-                ("publishTF", "isaacsim.ros2.bridge.ROS2PublishTransformTree"),
+                ("publishOdom", "isaacsim.ros2.bridge.ROS2PublishOdometry"),
+                ("publishTF", "isaacsim.ros2.bridge.ROS2PublishRawTransformTree"),
             ],
             keys.CONNECT: [
-                ("OnPlaybackTick.outputs:tick", "readPrim.inputs:execIn"),
-                ("readPrim.outputs:execOut", "publishTF.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "publishOdom.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "publishTF.inputs:execIn"),
+                ("readSimTime.outputs:simulationTime", "publishOdom.inputs:timeStamp"),
                 ("readSimTime.outputs:simulationTime", "publishTF.inputs:timeStamp"),
             ],
             keys.SET_VALUES: [
-                ("readPrim.inputs:primPath", "/World/envs/env_0/Robot/base"),
-                ("readPrim.inputs:axis", "X"),
-                (
-                    "publishTF.inputs:parentFrameId",
-                    "camera_link",
-                ),  # camera_link 기준 (RTAB-Map odom 기준)
+                # Odometry 메시지 설정
+                ("publishOdom.inputs:chassisFrameId", "base_link"),
+                ("publishOdom.inputs:odomFrameId", "odom"),
+                ("publishOdom.inputs:topicName", "/odom"),
+                # TF: odom → base_link
+                ("publishTF.inputs:parentFrameId", "odom"),
                 ("publishTF.inputs:childFrameId", "base_link"),
                 ("publishTF.inputs:topicName", "/tf"),
             ],
         },
     )
-    print("[INFO] ROS2 robot TF 퍼블리셔 설정 완료 (camera_link → base_link)")
+    print("[INFO] ROS2 Odometry + TF (odom → base_link) 퍼블리셔 설정 완료")
+
+
+def setup_imu_graph():
+    """IMU 퍼블리셔 설정 (/imu/data).
+
+    그래프만 생성하고, 실제 IMU 데이터는 메인 루프에서 주입합니다.
+    """
+    keys = og.Controller.Keys
+    og.Controller.edit(
+        {
+            "graph_path": "/ROS2_IMU",
+            "evaluator_name": "execution",
+            "pipeline_stage": og.GraphPipelineStage.GRAPH_PIPELINE_STAGE_SIMULATION,
+        },
+        {
+            keys.CREATE_NODES: [
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+                ("readSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+                ("publishImu", "isaacsim.ros2.bridge.ROS2PublishImu"),
+            ],
+            keys.CONNECT: [
+                ("OnPlaybackTick.outputs:tick", "publishImu.inputs:execIn"),
+                ("readSimTime.outputs:simulationTime", "publishImu.inputs:timeStamp"),
+            ],
+            keys.SET_VALUES: [
+                ("publishImu.inputs:frameId", "base_link"),
+                ("publishImu.inputs:topicName", "/imu/data"),
+            ],
+        },
+    )
+    print("[INFO] ROS2 IMU 퍼블리셔 설정 완료 (/imu/data)")
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
@@ -236,11 +272,17 @@ def main(env_cfg, agent_cfg):
     except Exception as e:
         print(f"[WARN] ROS2 bridge 설정 실패: {e}")
 
-    # 5.5 Go2 base_link TF 퍼블리셔 설정
+    # 5.5 Odometry + TF (odom → base_link) 퍼블리셔 설정
     try:
-        setup_robot_tf_graph()
+        setup_odom_graph()
     except Exception as e:
-        print(f"[WARN] Robot TF 설정 실패: {e}")
+        print(f"[WARN] Odom 설정 실패: {e}")
+
+    # 5.6 IMU 퍼블리셔 설정
+    try:
+        setup_imu_graph()
+    except Exception as e:
+        print(f"[WARN] IMU 설정 실패: {e}")
 
     # 6. Reset & Loop
     obs = env.get_observations()
@@ -256,6 +298,16 @@ def main(env_cfg, agent_cfg):
     if hasattr(env.unwrapped, "command_manager"):
         cmd_term = env.unwrapped.command_manager.get_term("base_velocity")
 
+    # OmniGraph 속성 경로 헬퍼
+    def _odom_attr(name):
+        return og.Controller.attribute(f"/ROS2_Odom/publishOdom.inputs:{name}")
+
+    def _tf_attr(name):
+        return og.Controller.attribute(f"/ROS2_Odom/publishTF.inputs:{name}")
+
+    def _imu_attr(name):
+        return og.Controller.attribute(f"/ROS2_IMU/publishImu.inputs:{name}")
+
     while simulation_app.is_running():
         start_time = time.time()
         vel_cmd = keyboard.advance()
@@ -269,6 +321,43 @@ def main(env_cfg, agent_cfg):
         with torch.inference_mode():
             actions = policy(obs)
             obs, _, _, _ = env.step(actions)
+
+        # --- Ground truth 데이터 주입 (OmniGraph) ---
+        try:
+            robot = env.unwrapped.scene["robot"]
+
+            # 위치/방향 (world frame)
+            pos = robot.data.root_link_pos_w[0].cpu().numpy()
+            quat_wxyz = robot.data.root_link_quat_w[0].cpu().numpy()
+            # Isaac Lab: WXYZ → OmniGraph: XYZW
+            quat_xyzw = [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]
+
+            # 속도 (world frame)
+            lin_vel = robot.data.root_link_lin_vel_w[0].cpu().numpy()
+            ang_vel = robot.data.root_link_ang_vel_w[0].cpu().numpy()
+
+            # Odometry 메시지 주입
+            og.Controller.set(_odom_attr("position"), pos.tolist())
+            og.Controller.set(_odom_attr("orientation"), quat_xyzw)
+            og.Controller.set(_odom_attr("linearVelocity"), lin_vel.tolist())
+            og.Controller.set(_odom_attr("angularVelocity"), ang_vel.tolist())
+
+            # TF (odom → base_link) 주입
+            og.Controller.set(_tf_attr("translation"), pos.tolist())
+            og.Controller.set(_tf_attr("rotation"), quat_xyzw)
+
+            # IMU 데이터 주입
+            imu = env.unwrapped.scene["imu_sensor"]
+            imu_ang_vel = imu.data.ang_vel_b[0].cpu().numpy()
+            imu_lin_acc = imu.data.lin_acc_b[0].cpu().numpy()
+            imu_quat_wxyz = imu.data.quat_w[0].cpu().numpy()
+            imu_quat_xyzw = [imu_quat_wxyz[1], imu_quat_wxyz[2], imu_quat_wxyz[3], imu_quat_wxyz[0]]
+
+            og.Controller.set(_imu_attr("angularVelocity"), imu_ang_vel.tolist())
+            og.Controller.set(_imu_attr("linearAcceleration"), imu_lin_acc.tolist())
+            og.Controller.set(_imu_attr("orientation"), imu_quat_xyzw)
+        except Exception:
+            pass  # 초기 프레임에서 데이터 없을 수 있음
 
         if args_cli.rt.lower() in ("true", "1", "yes"):
             sleep_time = dt - (time.time() - start_time)
