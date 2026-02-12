@@ -251,12 +251,6 @@ def main(env_cfg, agent_cfg):
         )
     )
 
-    # 키보드 명령 지속 방지를 위한 변수들
-    last_vel_cmd = np.array([0.0, 0.0, 0.0])
-    stuck_counter = 0
-    STUCK_THRESHOLD = 5  # 5프레임 동안 같은 명령이면 리셋 (릴리즈 이벤트 누락 대응)
-    frame_count = 0
-
     # 명령 manager 미리 캐싱
     cmd_term = None
     if hasattr(env.unwrapped, "command_manager"):
@@ -264,43 +258,17 @@ def main(env_cfg, agent_cfg):
 
     while simulation_app.is_running():
         start_time = time.time()
-        raw_vel_cmd = keyboard.advance()
-        vel_cmd = np.asarray(raw_vel_cmd.cpu().numpy(), dtype=np.float32)
-
-        # 스턱(같은 명령 지속) 감지 — 키 릴리즈 누락 시 빠르게 리셋
-        if np.allclose(vel_cmd, last_vel_cmd, atol=0.01) and np.any(
-            np.abs(vel_cmd) > 0.1
-        ):
-            stuck_counter += 1
-            if stuck_counter >= STUCK_THRESHOLD:
-                keyboard.reset()
-                vel_cmd = np.array([0.0, 0.0, 0.0])
-                stuck_counter = 0
-        else:
-            stuck_counter = 0
-        last_vel_cmd = vel_cmd.copy()
-
-        # 데드존
-        if np.all(np.abs(vel_cmd) < 0.05):
-            vel_cmd = np.array([0.0, 0.0, 0.0])
+        vel_cmd = keyboard.advance()
 
         # 명령어 적용
         if cmd_term is not None:
-            cmd_term.vel_command_b[0] = torch.tensor(
-                [vel_cmd[0], vel_cmd[1], vel_cmd[2]],
-                device=env.unwrapped.device,
-                dtype=torch.float32,
-            )
+            cmd_term.vel_command_b[0, 0] = vel_cmd[0]
+            cmd_term.vel_command_b[0, 1] = vel_cmd[1]
+            cmd_term.vel_command_b[0, 2] = vel_cmd[2]
 
         with torch.inference_mode():
             actions = policy(obs)
             obs, _, _, _ = env.step(actions)
-
-        # FPS 출력 (100프레임마다만 — I/O 블로킹 최소화)
-        frame_count += 1
-        if frame_count % 100 == 0:
-            fps = 100.0 / (time.time() - start_time + 1e-6)
-            print(f"[INFO] frame={frame_count}, loop_fps≈{1.0/(time.time()-start_time):.1f}, cmd={vel_cmd}")
 
         if args_cli.rt.lower() in ("true", "1", "yes"):
             sleep_time = dt - (time.time() - start_time)
